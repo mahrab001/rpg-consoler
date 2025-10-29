@@ -28,15 +28,19 @@
             setLogLevel
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- DYNAMIC FIREBASE CONFIG ---
-        // This now uses the config provided by the environment, which is
-        // required to match the __initial_auth_token.
-        const firebaseConfig = JSON.parse(
-            typeof __firebase_config !== 'undefined' 
-                ? __firebase_config 
-                : '{}'
-        );
-        // --- END OF DYNAMIC CONFIG ---
+        // --- REVERTED TO HARD-CODED CONFIG ---
+        // This uses your specific Firebase project config.
+        const firebaseConfig = {
+          apiKey: "AIzaSyDVH_Nol7VFTn7QTtYgX5a8Ip9UY2YretE", 
+          authDomain: "sosta-rpg.firebaseapp.com",
+          databaseURL: "https://sosta-rpg-default-rtdb.asia-southeast1.firebasedatabase.app",
+          projectId: "sosta-rpg",
+          storageBucket: "sosta-rpg.appspot.com",
+          messagingSenderId: "596625537573",
+          appId: "1:596625537573:web:41a00f81cfeafaa875754",
+          measurementId: "G-TNQ0EZ6C2W"
+        };
+        // --- END OF HARD-CODED CONFIG ---
 
         // --- GLOBAL VARIABLES ---
         let db, auth;
@@ -51,7 +55,7 @@
         
         // App ID (for Firestore path)
         // This MUST match the project ID in your config and security rules
-        const firestoreAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; 
+        const firestoreAppId = 'sosta-rpg'; // FIXED: Hard-code to match your project and security rules
         
         // --- DOM ELEMENTS ---
         const viewSelector = document.getElementById('view-selector');
@@ -95,7 +99,7 @@
             try {
                 // --- Config validation
                 if (!firebaseConfig.apiKey) {
-                    console.error("Firebase config is missing or invalid (__firebase_config not found).");
+                    console.error("Firebase config is missing or invalid.");
                     loadingView.textContent = "Error: Firebase configuration is missing or invalid.";
                     return; 
                 }
@@ -112,7 +116,7 @@
                 };
 
                 // --- AUTH LOGIC ---
-                // This will now use the correct config and token should match.
+                // Forcing anonymous sign-in to avoid token/config mismatch.
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
@@ -121,13 +125,11 @@
                     } else {
                         // Not authenticated, sign in.
                         try {
-                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                                console.log("Signing in with custom token...");
-                                await signInWithCustomToken(auth, __initial_auth_token);
-                            } else {
-                                console.log("Signing in anonymously...");
-                                await signInAnonymously(auth);
-                            }
+                            // --- MODIFIED ---
+                            // Forcing anonymous sign-in to avoid token/config mismatch.
+                            console.log("Signing in anonymously...");
+                            await signInAnonymously(auth);
+                            // --- END OF MODIFICATION ---
                         } catch (authError) {
                             console.error("Authentication error:", authError);
                             if (authError.code === 'auth/configuration-not-found') {
@@ -238,14 +240,14 @@
                     securityRulesWarning.classList.remove('hidden');
                     gameMessage.textContent = "Error: Permission Denied. Check security rules.";
                     
-                    // Update security rules warning to use the dynamic app ID
+                    // Update security rules warning to use the hard-coded app ID
                     const rulesText = document.querySelector('#security-rules-warning code');
                     if (rulesText) {
                         rulesText.textContent = `rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // This rule allows anyone to read/write to the public path for this app
-    match /artifacts/${firestoreAppId}/public/data/{document=**} {
+    match /artifacts/sosta-rpg/public/data/{document=**} {
       allow read, write: if true;
     }
   }
@@ -872,12 +874,12 @@ service cloud.firestore {
         <div id="security-rules-warning" class="hidden bg-red-800 border border-red-600 text-red-100 p-4 rounded-lg my-4">
             <h4 class="font-bold text-lg mb-2">Firestore Security Error</h4>
             <p>Could not create the game due to a 'permission-denied' error. This means your <strong>Cloud Firestore</strong> security rules are not set up to allow public writes.</p>
-            <p class="mt-2">Please go to your Firebase project's <strong>Firestore Database > Rules</strong> tab and use the following rules to allow this game to function (this code uses the dynamic App ID):</p>
+            <p class="mt-2">Please go to your Firebase project's <strong>Firestore Database > Rules</strong> tab and use the following rules to allow this game to function (this code uses 'sosta-rpg' as the ID):</p>
             <pre class="bg-gray-900 p-2 rounded mt-2 text-sm whitespace-pre-wrap"><code>rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // This rule allows anyone to read/write to the public path for this app
-    match /artifacts/default-app-id/public/data/{document=**} {
+    match /artifacts/sosta-rpg/public/data/{document=**} {
       allow read, write: if true;
     }
   }
@@ -971,4 +973,5 @@ service cloud.firestore {
 
 </body>
 </html>
+
 
