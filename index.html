@@ -10,7 +10,7 @@
     <script type="module">
         // Firebase Imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js"; // Added analytics
+        // import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js"; // REMOVED: Causing permissions error
         import { 
             getAuth, 
             signInAnonymously, 
@@ -28,22 +28,15 @@
             setLogLevel
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // --- FIXED FIREBASE CONFIG ---
-        // This section is now hard-coded with your project's details
-        // from your screenshot.
-        const firebaseConfig = {
-          // ▼▼▼ API Key is now included ▼▼▼
-          apiKey: "AIzaSyDVH_Nol7VFTn7QTtYgX5a8Ip9UY2YretE", 
-          // ▲▲▲ API Key is now included ▲▲▲
-          authDomain: "sosta-rpg.firebaseapp.com",
-          databaseURL: "https://sosta-rpg-default-rtdb.asia-southeast1.firebasedatabase.app",
-          projectId: "sosta-rpg",
-          storageBucket: "sosta-rpg.appspot.com",
-          messagingSenderId: "596625537573",
-          appId: "1:596625537573:web:41a00f81cfeafaa875754",
-          measurementId: "G-TNQ0EZ6C2W"
-        };
-        // --- END OF FIXED CONFIG ---
+        // --- DYNAMIC FIREBASE CONFIG ---
+        // This now uses the config provided by the environment, which is
+        // required to match the __initial_auth_token.
+        const firebaseConfig = JSON.parse(
+            typeof __firebase_config !== 'undefined' 
+                ? __firebase_config 
+                : '{}'
+        );
+        // --- END OF DYNAMIC CONFIG ---
 
         // --- GLOBAL VARIABLES ---
         let db, auth;
@@ -58,7 +51,7 @@
         
         // App ID (for Firestore path)
         // This MUST match the project ID in your config and security rules
-        const firestoreAppId = typeof __app_id !== 'undefined' ? __app_id : 'sosta-rpg'; 
+        const firestoreAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; 
         
         // --- DOM ELEMENTS ---
         const viewSelector = document.getElementById('view-selector');
@@ -100,15 +93,15 @@
         // --- INITIALIZATION ---
         window.onload = async () => {
             try {
-                // --- FIXED --- Added config validation
+                // --- Config validation
                 if (!firebaseConfig.apiKey) {
-                    console.error("Firebase config is missing or invalid.");
+                    console.error("Firebase config is missing or invalid (__firebase_config not found).");
                     loadingView.textContent = "Error: Firebase configuration is missing or invalid.";
                     return; 
                 }
 
                 const app = initializeApp(firebaseConfig);
-                const analytics = getAnalytics(app); // Initialize Analytics
+                // const analytics = getAnalytics(app); // REMOVED: Causing permissions error
                 db = getFirestore(app);
                 auth = getAuth(app);
                 setLogLevel('Debug');
@@ -118,9 +111,8 @@
                     customAlertModal.classList.add('hidden');
                 };
 
-                // --- FIXED AUTH LOGIC ---
-                // Now correctly attempts to sign in with __initial_auth_token first,
-                // then falls back to anonymous sign-in.
+                // --- AUTH LOGIC ---
+                // This will now use the correct config and token should match.
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
@@ -245,6 +237,20 @@
                 if (e.code === 'permission-denied' || e.message.includes('permission-denied')) {
                     securityRulesWarning.classList.remove('hidden');
                     gameMessage.textContent = "Error: Permission Denied. Check security rules.";
+                    
+                    // Update security rules warning to use the dynamic app ID
+                    const rulesText = document.querySelector('#security-rules-warning code');
+                    if (rulesText) {
+                        rulesText.textContent = `rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // This rule allows anyone to read/write to the public path for this app
+    match /artifacts/${firestoreAppId}/public/data/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}`;
+                    }
                 }
             }
         }
@@ -539,6 +545,8 @@
             playerUserIdDisplay.textContent = `Your Player ID: ${userId}`;
         };
 
+        // --- START OF FIXED FUNCTION ---
+        // This 'onclick' function has the corrected logic
         joinGameBtn.onclick = async () => {
             const idToJoin = gameIdInput.value.trim().toUpperCase();
             if (!idToJoin) {
@@ -554,6 +562,7 @@
             
             try {
                 let assignedRole = null;
+                
                 await runTransaction(db, async (transaction) => {
                     const gameDoc = await transaction.get(gameRef);
                     if (!gameDoc.exists()) {
@@ -562,19 +571,36 @@
                     
                     const gameData = gameDoc.data();
                     
-                    if (gameData.player1Id === userId || gameData.player2Id === userId) {
-                        // Already in game, just reconnect
-                        assignedRole = (gameData.player1Id === userId) ? 'player1' : 'player2';
-                    } else if (!gameData.player1Id) {
-                        transaction.update(gameRef, { player1Id: userId });
-                        assignedRole = 'player1';
-                    } else if (!gameData.player2Id) {
-                        transaction.update(gameRef, { player2Id: userId });
+                    if (gameData.player1Id === userId) {
+                        // User is already P1. Check if they are trying to join as P2.
+                        if (!gameData.player2Id) {
+                            // P2 slot is empty, assign P2 (for testing)
+                            transaction.update(gameRef, { player2Id: userId });
+                            assignedRole = 'player2';
+                        } else if (gameData.player2Id === userId) {
+                            // User is already P1 and P2, just reconnect as P2
+                            assignedRole = 'player2';
+                        } else {
+                            // P2 slot is full (by someone else), reconnect as P1
+                            assignedRole = 'player1';
+                        }
+                    } else if (gameData.player2Id === userId) {
+                        // User is already P2, reconnect as P2
                         assignedRole = 'player2';
                     } else {
-                        throw new Error("This game is already full.");
+                        // User is not in the game. Join first available slot.
+                        if (!gameData.player1Id) {
+                            transaction.update(gameRef, { player1Id: userId });
+                            assignedRole = 'player1';
+                        } else if (!gameData.player2Id) {
+                            transaction.update(gameRef, { player2Id: userId });
+                            assignedRole = 'player2';
+                        } else {
+                            throw new Error("This game is already full.");
+                        }
                     }
                 });
+                // --- END OF FIXED LOGIC ---
 
                 // Join success
                 currentGameId = idToJoin;
@@ -602,6 +628,7 @@
                 joinGameBtn.textContent = "Join Game";
             }
         };
+        // --- END OF FIXED FUNCTION ---
         
         function renderController(gameState) {
             controllerMessage.textContent = gameState.message;
@@ -646,134 +673,134 @@
              const gameRef = doc(db, 'artifacts', firestoreAppId, 'public', 'data', 'games', currentGameId);
              
              try {
-                 // We use a transaction to prevent race conditions
-                 await runTransaction(db, async (transaction) => {
-                     const gameDoc = await transaction.get(gameRef);
-                     if (!gameDoc.exists()) throw new Error("Game not found");
-                     
-                     let gameState = gameDoc.data();
-                     
-                     // Check if it's my turn
-                     if (gameState.turn !== myPlayerRole) {
-                         console.warn("Not your turn!");
-                         return;
-                     }
-                     
-                     let newState = { ...gameState };
-                     let currentP = (myPlayerRole === 'player1') ? 'p1' : 'p2';
-                     let targetP = (myPlayerRole === 'player1') ? 'p2' : 'p1';
-                     
-                     // Clear previous defend status
-                     newState[`${currentP}_status`] = null;
+                  // We use a transaction to prevent race conditions
+                  await runTransaction(db, async (transaction) => {
+                       const gameDoc = await transaction.get(gameRef);
+                       if (!gameDoc.exists()) throw new Error("Game not found");
+                       
+                       let gameState = gameDoc.data();
+                       
+                       // Check if it's my turn
+                       if (gameState.turn !== myPlayerRole) {
+                           console.warn("Not your turn!");
+                           return;
+                       }
+                       
+                       let newState = { ...gameState };
+                       let currentP = (myPlayerRole === 'player1') ? 'p1' : 'p2';
+                       let targetP = (myPlayerRole === 'player1') ? 'p2' : 'p1';
+                       
+                       // Clear previous defend status
+                       newState[`${currentP}_status`] = null;
 
-                     // --- Determine target (PvP vs Boss) ---
-                     let isBossFight = newState.gameState === 'boss';
-                     let targetKey = isBossFight ? 'boss' : 'p2'; // Default to p2 if not boss
-                     if (!isBossFight) {
-                        targetKey = (myPlayerRole === 'player1') ? 'p2' : 'p1';
-                     }
+                       // --- Determine target (PvP vs Boss) ---
+                       let isBossFight = newState.gameState === 'boss';
+                       let targetKey = isBossFight ? 'boss' : 'p2'; // Default to p2 if not boss
+                       if (!isBossFight) {
+                           targetKey = (myPlayerRole === 'player1') ? 'p2' : 'p1';
+                       }
 
 
-                     // Calculate Action
-                     if (actionType === 'attack') {
-                         const damage = 10 + Math.floor(Math.random() * 6); // 10-15 damage
-                         let finalDamage = damage;
-                         
-                         if (isBossFight) {
-                             // Boss isn't defending
-                             newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
-                             newState.lastAction = { type: 'attack', source: myPlayerRole, target: 'boss', damage: finalDamage };
-                         } else {
-                             // Check if PvP target is defending
-                             if(newState[`${targetP}_status`] === 'defending') {
-                                 finalDamage = Math.floor(finalDamage / 2);
-                             }
-                             newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
-                             newState.lastAction = { type: 'attack', source: myPlayerRole, target: targetP, damage: finalDamage };
-                         }
-                         
-                         // Add special charge
-                         newState[`${currentP}_special_charge`] = Math.min(100, newState[`${currentP}_special_charge`] + 20);
+                       // Calculate Action
+                       if (actionType === 'attack') {
+                           const damage = 10 + Math.floor(Math.random() * 6); // 10-15 damage
+                           let finalDamage = damage;
+                           
+                           if (isBossFight) {
+                               // Boss isn't defending
+                               newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
+                               newState.lastAction = { type: 'attack', source: myPlayerRole, target: 'boss', damage: finalDamage };
+                           } else {
+                               // Check if PvP target is defending
+                               if(newState[`${targetP}_status`] === 'defending') {
+                                   finalDamage = Math.floor(finalDamage / 2);
+                               }
+                               newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
+                               newState.lastAction = { type: 'attack', source: myPlayerRole, target: targetP, damage: finalDamage };
+                           }
+                           
+                           // Add special charge
+                           newState[`${currentP}_special_charge`] = Math.min(100, newState[`${currentP}_special_charge`] + 20);
 
-                     } else if (actionType === 'defend') {
-                         newState[`${currentP}_status`] = 'defending';
-                         newState.lastAction = { type: 'defend', source: myPlayerRole };
-                         // Add special charge
-                         newState[`${currentP}_special_charge`] = Math.min(100, newState[`${currentP}_special_charge`] + 10);
+                       } else if (actionType === 'defend') {
+                           newState[`${currentP}_status`] = 'defending';
+                           newState.lastAction = { type: 'defend', source: myPlayerRole };
+                           // Add special charge
+                           newState[`${currentP}_special_charge`] = Math.min(100, newState[`${currentP}_special_charge`] + 10);
 
-                     } else if (actionType === 'special') {
-                         if (newState[`${currentP}_special_charge`] < 100) return; // Not enough charge
-                         
-                         const damage = 30 + Math.floor(Math.random() * 11); // 30-40 damage
-                         let finalDamage = damage; // Defend doesn't block special
-                         
-                         if (isBossFight) {
-                             newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
-                             newState.lastAction = { type: 'special', source: myPlayerRole, target: 'boss', damage: finalDamage };
-                         } else {
-                             newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
-                             newState.lastAction = { type: 'special', source: myPlayerRole, target: targetP, damage: finalDamage };
-                         }
-                         
-                         // Reset special charge
-                         newState[`${currentP}_special_charge`] = 0;
-                     }
-                     
-                     // --- AFTER ACTION ---
-                     
-                     if (isBossFight) {
-                         // --- Boss Fight Logic ---
-                         if (newState.boss_hp === 0) {
-                             // BOSS DEFEATED!
-                             newState.gameState = 'ended';
-                             newState.message = `The Boss has been defeated! ${myPlayerRole} wins!`;
-                             newState.turn = null;
-                         } else if (newState.p1_hp === 0 || newState.p2_hp === 0) {
-                             // A player was defeated
-                             const loser = (newState.p1_hp === 0) ? 'player1' : 'player2';
-                             const otherPlayer = (loser === 'player1') ? 'player2' : 'player1';
-                             
-                             newState[`${loser}_status`] = 'defeated';
+                       } else if (actionType === 'special') {
+                           if (newState[`${currentP}_special_charge`] < 100) return; // Not enough charge
+                           
+                           const damage = 30 + Math.floor(Math.random() * 11); // 30-40 damage
+                           let finalDamage = damage; // Defend doesn't block special
+                           
+                           if (isBossFight) {
+                               newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
+                               newState.lastAction = { type: 'special', source: myPlayerRole, target: 'boss', damage: finalDamage };
+                           } else {
+                               newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
+                               newState.lastAction = { type: 'special', source: myPlayerRole, target: targetP, damage: finalDamage };
+                           }
+                           
+                           // Reset special charge
+                           newState[`${currentP}_special_charge`] = 0;
+                       }
+                       
+                       // --- AFTER ACTION ---
+                       
+                       if (isBossFight) {
+                           // --- Boss Fight Logic ---
+                           if (newState.boss_hp === 0) {
+                               // BOSS DEFEATED!
+                               newState.gameState = 'ended';
+                               newState.message = `The Boss has been defeated! ${myPlayerRole} wins!`;
+                               newState.turn = null;
+                           } else if (newState.p1_hp === 0 || newState.p2_hp === 0) {
+                               // A player was defeated
+                               const loser = (newState.p1_hp === 0) ? 'player1' : 'player2';
+                               const otherPlayer = (loser === 'player1') ? 'player2' : 'player1';
+                               
+                               newState[`${loser}_status`] = 'defeated';
 
-                             if(newState[`${otherPlayer}_hp`] > 0) {
-                                 // Other player is still alive, pass turn to Boss
-                                 newState.turn = 'boss_ai';
-                                 newState.message = "The Boss is preparing an attack...";
-                             } else {
-                                 // Both players are dead
-                                 newState.gameState = 'ended';
-                                 newState.message = 'The Boss has defeated you!';
-                                 newState.turn = null;
-                             }
-                         } else {
-                             // Pass turn to Boss
-                             newState.turn = 'boss_ai';
-                             newState.message = "The Boss is preparing an attack...";
-                         }
+                               if(newState[`${otherPlayer}_hp`] > 0) {
+                                   // Other player is still alive, pass turn to Boss
+                                   newState.turn = 'boss_ai';
+                                   newState.message = "The Boss is preparing an attack...";
+                               } else {
+                                   // Both players are dead
+                                   newState.gameState = 'ended';
+                                   newState.message = 'The Boss has defeated you!';
+                                   newState.turn = null;
+                               }
+                           } else {
+                               // Pass turn to Boss
+                               newState.turn = 'boss_ai';
+                               newState.message = "The Boss is preparing an attack...";
+                           }
 
-                    } else {
-                         // --- PvP Fight Logic ---
-                         if (newState.p1_hp === 0 || newState.p2_hp === 0) {
-                             // A player was defeated in PvP
-                             const winner = (newState.p1_hp === 0) ? 'player2' : 'player1';
-                             const loser = (winner === 'player1') ? 'player2' : 'player1';
-                             
-                             newState.gameState = 'boss';
-                             newState.turn = winner; // Winner gets first turn against boss
-                             newState.message = `Player ${winner === 'player1' ? 1 : 2} wins! The FINAL BOSS appears!`;
-                             newState[`${loser}_status`] = 'defeated';
-                         
-                         } else {
-                             // Pass turn to other player
-                             newState.turn = targetP;
-                             newState.message = `Player ${targetP === 'p1' ? 1 : 2}'s Turn!`;
-                         }
-                    }
+                       } else {
+                           // --- PvP Fight Logic ---
+                           if (newState.p1_hp === 0 || newState.p2_hp === 0) {
+                               // A player was defeated in PvP
+                               const winner = (newState.p1_hp === 0) ? 'player2' : 'player1';
+                               const loser = (winner === 'player1') ? 'player2' : 'player1';
+                               
+                               newState.gameState = 'boss';
+                               newState.turn = winner; // Winner gets first turn against boss
+                               newState.message = `Player ${winner === 'player1' ? 1 : 2} wins! The FINAL BOSS appears!`;
+                               newState[`${loser}_status`] = 'defeated';
+                           
+                           } else {
+                               // Pass turn to other player
+                               newState.turn = targetP;
+                               newState.message = `Player ${targetP === 'p1' ? 1 : 2}'s Turn!`;
+                           }
+                       }
 
-                     transaction.update(gameRef, newState);
-                 });
+                       transaction.update(gameRef, newState);
+                  });
              } catch (e) {
-                 console.error("Action failed:", e);
+                  console.error("Action failed:", e);
              }
         }
     </script>
@@ -837,20 +864,20 @@
         </div>
 
         <!-- 
-          FIXED: SECURITY RULES WARNING 
-          This warning will appear if the game fails to create.
-          The screenshot you provided showed rules for the REALTIME DATABASE,
-          but this code uses CLOUD FIRESTORE. They have separate rules.
+            FIXED: SECURITY RULES WARNING 
+            This warning will appear if the game fails to create.
+            The screenshot you provided showed rules for the REALTIME DATABASE,
+            but this code uses CLOUD FIRESTORE. They have separate rules.
         -->
         <div id="security-rules-warning" class="hidden bg-red-800 border border-red-600 text-red-100 p-4 rounded-lg my-4">
             <h4 class="font-bold text-lg mb-2">Firestore Security Error</h4>
             <p>Could not create the game due to a 'permission-denied' error. This means your <strong>Cloud Firestore</strong> security rules are not set up to allow public writes.</p>
-            <p class="mt-2">Please go to your Firebase project's <strong>Firestore Database > Rules</strong> tab and use the following rules to allow this game to function (this code uses 'sosta-rpg' as the ID):</p>
+            <p class="mt-2">Please go to your Firebase project's <strong>Firestore Database > Rules</strong> tab and use the following rules to allow this game to function (this code uses the dynamic App ID):</p>
             <pre class="bg-gray-900 p-2 rounded mt-2 text-sm whitespace-pre-wrap"><code>rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // This rule allows anyone to read/write to the public path for this app
-    match /artifacts/sosta-rpg/public/data/{document=**} {
+    match /artifacts/default-app-id/public/data/{document=**} {
       allow read, write: if true;
     }
   }
@@ -929,8 +956,8 @@ service cloud.firestore {
     </div>
 
     <!-- 
-      FIXED: Custom Alert Modal
-      Replaces the use of window.alert(), which is not allowed.
+        FIXED: Custom Alert Modal
+        Replaces the use of window.alert(), which is not allowed.
     -->
     <div id="custom-alert-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
         <div class="bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm w-full">
