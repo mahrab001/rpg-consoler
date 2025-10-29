@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2-Player Fighting RPG</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Firebase -->
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            signInAnonymously, 
+            signInWithCustomToken, 
+            onAuthStateChanged 
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            setDoc, 
+            onSnapshot, 
+            getDoc,
+            updateDoc,
+            runTransaction,
+            setLogLevel
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- GLOBAL VARIABLES ---
+        let db, auth;
+        let userId = null;
+        let currentGameId = null;
+        let myPlayerRole = null; // 'player1' or 'player2'
+        let unsubscribeGameListener = null;
+
+        // Canvas variables
+        let canvas, ctx;
+        let particles = [];
+        
+        // App ID and Firebase Config
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-rpg-game';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        // --- DOM ELEMENTS ---
+        const viewSelector = document.getElementById('view-selector');
+        const hostView = document.getElementById('host-view');
+        const playerView = document.getElementById('player-view');
+        const loadingView = document.getElementById('loading-view');
+
+        // Host Elements
+        const gameIdDisplay = document.getElementById('game-id-display');
+        const hostUserIdDisplay = document.getElementById('host-user-id');
+        const canvasContainer = document.getElementById('canvas-container');
+        const gameMessage = document.getElementById('game-message');
+        const p1HealthBar = document.getElementById('p1-health-bar-inner');
+        const p2HealthBar = document.getElementById('p2-health-bar-inner');
+        const bossHealthBar = document.getElementById('boss-health-bar-inner');
+        const bossHealthContainer = document.getElementById('boss-health-container');
+        const p1StatusText = document.getElementById('p1-status-text'); // Added
+        const p2StatusText = document.getElementById('p2-status-text'); // Added
+        
+        // Player Elements
+        const joinGameView = document.getElementById('join-game-view');
+        const controllerView = document.getElementById('controller-view');
+        const gameIdInput = document.getElementById('game-id-input');
+        const joinGameBtn = document.getElementById('join-game-btn');
+        const joinError = document.getElementById('join-error');
+        const playerUserIdDisplay = document.getElementById('player-user-id');
+        const controllerMessage = document.getElementById('controller-message');
+        const actionButtons = document.getElementById('action-buttons');
+        const attackBtn = document.getElementById('attack-btn');
+        const defendBtn = document.getElementById('defend-btn');
+        const specialBtn = document.getElementById('special-btn');
+
+        // --- INITIALIZATION ---
+        window.onload = async () => {
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('Debug');
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        console.log("User authenticated:", userId);
+                        showView('selector');
+                    } else {
+                        // Not authenticated, sign in.
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (authError) {
+                            console.error("Authentication error:", authError);
+                            loadingView.textContent = "Error: Could not authenticate.";
+                        }
+                    }
+                });
+
+            } catch (e) {
+                console.error("Firebase init error:", e);
+                loadingView.textContent = "Error: Could not connect to services.";
+            }
+        };
+
+        // --- VIEW MANAGEMENT ---
+        function showView(viewName) {
+            [loadingView, viewSelector, hostView, playerView].forEach(v => v.classList.add('hidden'));
+            if (viewName === 'loading') loadingView.classList.remove('hidden');
+            if (viewName === 'selector') viewSelector.classList.remove('hidden');
+            if (viewName === 'host') hostView.classList.remove('hidden');
+            if (viewName === 'player') playerView.classList.remove('hidden');
+        }
+
+        // --- HOST LOGIC ---
+        document.getElementById('select-host-btn').onclick = () => {
+            initHost();
+        };
+
+        async function initHost() {
+            showView('host');
+            currentGameId = crypto.randomUUID().substring(0, 6).toUpperCase();
+            gameIdDisplay.textContent = currentGameId;
+            hostUserIdDisplay.textContent = `Your Host ID: ${userId}`;
+
+            const initialState = {
+                hostId: userId,
+                player1Id: null,
+                player2Id: null,
+                p1_hp: 100,
+                p1_max_hp: 100,
+                p1_status: null, // 'defending'
+                p1_special_charge: 0,
+                p2_hp: 100,
+                p2_max_hp: 100,
+                p2_status: null,
+                p2_special_charge: 0,
+                boss_hp: 300,
+                boss_max_hp: 300,
+                gameState: 'waiting_for_players', // 'pvp', 'boss', 'ended'
+                turn: null,
+                message: "Waiting for Player 1 to join...",
+                lastAction: null // { type: 'attack', target: 'p2', damage: 10 }
+            };
+
+            try {
+                const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId);
+                await setDoc(gameRef, initialState);
+
+                // Setup canvas
+                canvas = document.getElementById('game-canvas');
+                ctx = canvas.getContext('2d');
+                resizeCanvas();
+                window.addEventListener('resize', resizeCanvas);
+
+                // Listen for game state changes
+                unsubscribeGameListener = onSnapshot(gameRef, (doc) => {
+                    if (doc.exists()) {
+                        const gameState = doc.data();
+                        // renderGame(gameState); // This function was not defined
+                        handleGameLogic(gameState); // This function handles UI updates
+                    }
+                });
+                
+                // Start game loop
+                gameLoop();
+
+            } catch (e) {
+                console.error("Failed to create game:", e);
+                gameMessage.textContent = "Error: Could not create game.";
+            }
+        }
+        
+        function resizeCanvas() {
+            canvas.width = canvasContainer.clientWidth;
+            canvas.height = canvasContainer.clientHeight;
+        }
+
+        function handleGameLogic(gameState) {
+            // Update UI elements
+            gameMessage.textContent = gameState.message;
+            p1HealthBar.style.width = `${(gameState.p1_hp / gameState.p1_max_hp) * 100}%`;
+            p2HealthBar.style.width = `${(gameState.p2_hp / gameState.p2_max_hp) * 100}%`;
+            bossHealthBar.style.width = `${(gameState.boss_hp / gameState.boss_max_hp) * 100}%`;
+            
+            // Update status text for host view (for shield drawing)
+            p1StatusText.textContent = gameState.p1_status === 'defending' ? 'Defending' : (gameState.p1_status === 'defeated' ? 'Defeated' : '');
+            p2StatusText.textContent = gameState.p2_status === 'defending' ? 'Defending' : (gameState.p2_status === 'defeated' ? 'Defeated' : '');
+            
+            if (gameState.gameState === 'boss') {
+                bossHealthContainer.classList.remove('hidden');
+            } else {
+                bossHealthContainer.classList.add('hidden');
+            }
+
+            // Handle turn-based logic
+            if (gameState.gameState === 'waiting_for_players') {
+                if (gameState.player1Id && !gameState.player2Id) {
+                    updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId), {
+                        message: "Waiting for Player 2 to join..."
+                    });
+                } else if (gameState.player1Id && gameState.player2Id) {
+                    // Start game
+                    updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId), {
+                        gameState: 'pvp',
+                        turn: 'player1',
+                        message: "Player 1's Turn!"
+                    });
+                }
+            } else if (gameState.gameState === 'pvp' && gameState.turn === 'boss_ai') {
+                // This shouldn't happen, but reset if it does
+                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId), { turn: 'player1' });
+            } else if (gameState.gameState === 'boss' && gameState.turn === 'boss_ai') {
+                // Boss AI takes its turn
+                handleBossTurn(gameState);
+            }
+            
+            // Handle last action animations
+            if (gameState.lastAction) {
+                const action = gameState.lastAction;
+                if(action.type === 'attack') {
+                    spawnParticles(action.target === 'p2' ? 0.75 : 0.25, 'red');
+                } else if (action.type === 'special') {
+                    spawnParticles(action.target === 'p2' ? 0.75 : 0.25, 'orange');
+                } else if (action.type === 'defend') {
+                    spawnParticles(action.source === 'player1' ? 0.25 : 0.75, 'blue');
+                } else if (action.type === 'boss_attack') {
+                    spawnParticles(action.target === 'player1' ? 0.25 : 0.75, 'purple');
+                }
+                
+                // Clear the action so it doesn't repeat
+                updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId), { lastAction: null });
+            }
+        }
+
+        async function handleBossTurn(gameState) {
+            // Wait 2 seconds to simulate thinking
+            await new Promise(resolve => setTimeout(resolve, 2000));
+
+            let targetPlayer = 'player1';
+            let targetHp = gameState.p1_hp;
+            // Target the player with more HP
+            if (gameState.p2_hp > gameState.p1_hp && gameState.p2_hp > 0) {
+                targetPlayer = 'player2';
+                targetHp = gameState.p2_hp;
+            }
+            if (targetHp <= 0) {
+                 // Switch target if primary is dead
+                targetPlayer = (targetPlayer === 'player1') ? 'player2' : 'player1';
+            }
+            
+            const damage = 15 + Math.floor(Math.random() * 10); // 15-24 damage
+            let newState = {};
+
+            if (targetPlayer === 'player1') {
+                const newHp = Math.max(0, gameState.p1_hp - damage);
+                newState = { p1_hp: newHp, lastAction: { type: 'boss_attack', target: 'player1', damage: damage } };
+                if (newHp === 0) {
+                     newState.p1_status = 'defeated';
+                }
+            } else {
+                const newHp = Math.max(0, gameState.p2_hp - damage);
+                newState = { p2_hp: newHp, lastAction: { type: 'boss_attack', target: 'player2', damage: damage } };
+                if (newHp === 0) {
+                     newState.p2_status = 'defeated';
+                }
+            }
+            
+            // Check for game over
+            if(newState.p1_hp <= 0 && newState.p2_hp <= 0) {
+                 newState.gameState = 'ended';
+                 newState.message = 'The Boss has defeated you!';
+                 newState.turn = null;
+            } else {
+                // Pass turn to next alive player
+                if(gameState.p1_hp > 0) {
+                    newState.turn = 'player1';
+                    newState.message = "Player 1's Turn!";
+                } else {
+                    newState.turn = 'player2';
+                    newState.message = "Player 2's Turn!";
+                }
+            }
+
+            updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId), newState);
+        }
+
+        // --- CANVAS DRAWING ---
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw background
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#1a202c');
+            gradient.addColorStop(1, '#2d3748');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw ground
+            ctx.fillStyle = '#4a5568';
+            ctx.fillRect(0, canvas.height - 50, canvas.width, 50);
+
+            // Get current state from UI (cheap way, better to pass gameState to gameLoop)
+            const p1HP = parseInt(p1HealthBar.style.width) || 100;
+            const p2HP = parseInt(p2HealthBar.style.width) || 100;
+            const bossHP = parseInt(bossHealthBar.style.width) || 0;
+
+            // Draw Player 1
+            if (p1HP > 0) {
+                drawCharacter(canvas.width * 0.25, canvas.height - 60, '#3b82f6', p1HealthBar.parentElement.nextElementSibling.textContent.includes('Defending'));
+            }
+            
+            // Draw Player 2
+            if (p2HP > 0) {
+                drawCharacter(canvas.width * 0.75, canvas.height - 60, '#ef4444', p2HealthBar.parentElement.nextElementSibling.textContent.includes('Defending'));
+            }
+            
+            // Draw Boss
+            if (bossHP > 0) {
+                drawBoss(canvas.width * 0.5, canvas.height - 60);
+            }
+            
+            updateAndDrawParticles();
+            
+            requestAnimationFrame(gameLoop);
+        }
+        
+        function drawCharacter(x, y, color, isDefending) {
+            ctx.save();
+            ctx.translate(x, y);
+            
+            // Body
+            ctx.fillStyle = color;
+            ctx.fillRect(-15, -60, 30, 60);
+            
+            // Head
+            ctx.fillStyle = '#e2e8f0';
+            ctx.beginPath();
+            ctx.arc(0, -75, 15, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Sword
+            ctx.fillStyle = '#94a3b8';
+            ctx.fillRect(-25, -50, 5, 40);
+            ctx.fillRect(-28, -15, 11, 5);
+
+            // Shield
+            if (isDefending) {
+                ctx.fillStyle = '#64748b';
+                ctx.beginPath();
+                ctx.moveTo(20, -50);
+                ctx.lineTo(20, -10);
+                ctx.quadraticCurveTo(20, 0, 30, 0);
+                ctx.quadraticCurveTo(40, 0, 40, -10);
+                ctx.lineTo(40, -50);
+                ctx.quadraticCurveTo(30, -60, 20, -50);
+                ctx.fill();
+            }
+            
+            ctx.restore();
+        }
+        
+        function drawBoss(x, y) {
+             ctx.save();
+             ctx.translate(x, y);
+             
+             // Body
+             ctx.fillStyle = '#581c87'; // Deep purple
+             ctx.beginPath();
+             ctx.moveTo(0, -150);
+             ctx.quadraticCurveTo(50, -100, 60, -50);
+             ctx.lineTo(60, 0);
+             ctx.lineTo(-60, 0);
+             ctx.lineTo(-60, -50);
+             ctx.quadraticCurveTo(-50, -100, 0, -150);
+             ctx.fill();
+             
+             // Head
+             ctx.fillStyle = '#7e22ce';
+             ctx.beginPath();
+             ctx.arc(0, -170, 30, 0, Math.PI * 2);
+             ctx.fill();
+             
+             // Eyes (glowing)
+             ctx.fillStyle = '#fde047';
+             ctx.beginPath();
+             ctx.arc(-10, -175, 5, 0, Math.PI * 2);
+             ctx.arc(10, -175, 5, 0, Math.PI * 2);
+             ctx.fill();
+             ctx.shadowBlur = 10;
+             ctx.shadowColor = '#fde047';
+
+             
+             ctx.restore();
+        }
+        
+        function spawnParticles(xPercent, color) {
+            const x = canvas.width * xPercent;
+            const y = canvas.height * 0.7;
+            for(let i = 0; i < 30; i++) {
+                particles.push({
+                   x: x,
+                   y: y,
+                   vx: (Math.random() - 0.5) * 8,
+                   vy: (Math.random() - 0.5) * 8,
+                   alpha: 1,
+                   color: color
+                });
+            }
+        }
+        
+        function updateAndDrawParticles() {
+            ctx.globalCompositeOperation = 'lighter';
+            for(let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.alpha -= 0.05;
+                
+                if (p.alpha <= 0) {
+                    particles.splice(i, 1);
+                } else {
+                    ctx.fillStyle = p.color;
+                    ctx.globalAlpha = p.alpha;
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+            ctx.globalAlpha = 1;
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+
+        // --- PLAYER LOGIC ---
+        document.getElementById('select-player-btn').onclick = () => {
+            showView('player');
+            joinGameView.classList.remove('hidden');
+            controllerView.classList.add('hidden');
+            playerUserIdDisplay.textContent = `Your Player ID: ${userId}`;
+        };
+
+        joinGameBtn.onclick = async () => {
+            const idToJoin = gameIdInput.value.trim().toUpperCase();
+            if (!idToJoin) {
+                joinError.textContent = "Please enter a Game ID.";
+                return;
+            }
+
+            joinError.textContent = "";
+            joinGameBtn.disabled = true;
+            joinGameBtn.textContent = "Joining...";
+            
+            const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', idToJoin);
+            
+            try {
+                let assignedRole = null;
+                await runTransaction(db, async (transaction) => {
+                    const gameDoc = await transaction.get(gameRef);
+                    if (!gameDoc.exists()) {
+                        throw new Error("Game not found. Check the ID and try again.");
+                    }
+                    
+                    const gameData = gameDoc.data();
+                    
+                    if (gameData.player1Id === userId || gameData.player2Id === userId) {
+                        // Already in game, just reconnect
+                        assignedRole = (gameData.player1Id === userId) ? 'player1' : 'player2';
+                    } else if (!gameData.player1Id) {
+                        transaction.update(gameRef, { player1Id: userId });
+                        assignedRole = 'player1';
+                    } else if (!gameData.player2Id) {
+                        transaction.update(gameRef, { player2Id: userId });
+                        assignedRole = 'player2';
+                    } else {
+                        throw new Error("This game is already full.");
+                    }
+                });
+
+                // Join success
+                currentGameId = idToJoin;
+                myPlayerRole = assignedRole;
+                joinGameView.classList.add('hidden');
+                controllerView.classList.remove('hidden');
+                
+                // Listen for game state changes
+                unsubscribeGameListener = onSnapshot(gameRef, (doc) => {
+                    if (doc.exists()) {
+                        renderController(doc.data());
+                    } else {
+                        // Game was deleted
+                        alert("The game session has ended.");
+                        showView('selector');
+                    }
+                });
+
+            } catch (e) {
+                console.error("Failed to join game:", e);
+                joinError.textContent = e.message;
+            } finally {
+                joinGameBtn.disabled = false;
+                joinGameBtn.textContent = "Join Game";
+            }
+        };
+        
+        function renderController(gameState) {
+            controllerMessage.textContent = gameState.message;
+            
+            if (gameState.turn === myPlayerRole && gameState.gameState !== 'ended') {
+                actionButtons.classList.remove('opacity-50', 'pointer-events-none');
+                controllerMessage.textContent = "Your Turn!";
+                
+                // Update special attack button
+                const charge = (myPlayerRole === 'player1') ? gameState.p1_special_charge : gameState.p2_special_charge;
+                specialBtn.textContent = `Special (${charge}/100)`;
+                specialBtn.disabled = (charge < 100);
+
+            } else {
+                actionButtons.classList.add('opacity-50', 'pointer-events-none');
+                if (gameState.gameState === 'ended') {
+                    controllerMessage.textContent = gameState.message;
+                } else if (gameState.turn) {
+                    controllerMessage.textContent = `Waiting for ${gameState.turn}...`;
+                }
+            }
+            
+            // Update status text
+            const myStatus = (myPlayerRole === 'player1') ? gameState.p1_status : gameState.p2_status;
+            if (myStatus === 'defending') {
+                controllerMessage.textContent += " (You are Defending)";
+            }
+            if (myStatus === 'defeated') {
+                controllerMessage.textContent = "You have been defeated!";
+                actionButtons.classList.add('opacity-50', 'pointer-events-none');
+            }
+        }
+        
+        // --- PLAYER ACTIONS ---
+        attackBtn.onclick = () => handlePlayerAction('attack');
+        defendBtn.onclick = () => handlePlayerAction('defend');
+        specialBtn.onclick = () => handlePlayerAction('special');
+        
+        async function handlePlayerAction(actionType) {
+             if (!myPlayerRole || !currentGameId) return;
+             
+             const gameRef = doc(db, 'artifacts', appId, 'public', 'data', 'games', currentGameId);
+             
+             try {
+                 // We use a transaction to prevent race conditions
+                 await runTransaction(db, async (transaction) => {
+                    const gameDoc = await transaction.get(gameRef);
+                    if (!gameDoc.exists()) throw new Error("Game not found");
+                    
+                    let gameState = gameDoc.data();
+                    
+                    // Check if it's my turn
+                    if (gameState.turn !== myPlayerRole) {
+                        console.warn("Not your turn!");
+                        return;
+                    }
+                    
+                    let newState = { ...gameState };
+                    let currentP = (myPlayerRole === 'player1') ? 'p1' : 'p2';
+                    let targetP = (myPlayerRole === 'player1') ? 'p2' : 'p1';
+                    
+                    // Clear previous defend status
+                    newState[`${currentP}_status`] = null;
+
+                    // Calculate Action
+                    if (actionType === 'attack') {
+                        const damage = 10 + Math.floor(Math.random() * 6); // 10-15 damage
+                        let finalDamage = damage;
+                        
+                        // Check if target is defending
+                        if(newState[`${targetP}_status`] === 'defending') {
+                            finalDamage = Math.floor(finalDamage / 2);
+                        }
+                        
+                        newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
+                        newState.lastAction = { type: 'attack', source: myPlayerRole, target: targetP, damage: finalDamage };
+                        
+                        // Add special charge
+                        newState[`${currentP}_special_charge`] = Math.min(100, newState[`${currentP}_special_charge`] + 20);
+
+                    } else if (actionType === 'defend') {
+                        newState[`${currentP}_status`] = 'defending';
+                        newState.lastAction = { type: 'defend', source: myPlayerRole };
+                        // Add special charge
+                        newState[`${currentP}_special_charge`] = Math.min(100, newState[`${currentP}_special_charge`] + 10);
+
+                    } else if (actionType === 'special') {
+                        if (newState[`${currentP}_special_charge`] < 100) return; // Not enough charge
+                        
+                        const damage = 30 + Math.floor(Math.random() * 11); // 30-40 damage
+                        let finalDamage = damage; // Defend doesn't block special
+                        
+                        newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
+                        newState.lastAction = { type: 'special', source: myPlayerRole, target: targetP, damage: finalDamage };
+                        
+                        // Reset special charge
+                        newState[`${currentP}_special_charge`] = 0;
+                    }
+                    
+                    // --- AFTER ACTION ---
+                    
+                    // Check for win/loss
+                    if (newState.p1_hp === 0 || newState.p2_hp === 0) {
+                        if (newState.gameState === 'pvp') {
+                            // A player was defeated in PvP
+                            const winner = (newState.p1_hp === 0) ? 'player2' : 'player1';
+                            const loser = (winner === 'player1') ? 'player2' : 'player1';
+                            
+                            newState.gameState = 'boss';
+                            newState.turn = winner; // Winner gets first turn against boss
+                            newState.message = `Player ${winner === 'player1' ? 1 : 2} wins! The FINAL BOSS appears!`;
+                            newState[`${loser}_status`] = 'defeated';
+                        
+                        } else if (newState.gameState === 'boss') {
+                             // A player was defeated in Boss mode
+                             const loser = (newState.p1_hp === 0) ? 'player1' : 'player2';
+                             const otherPlayer = (loser === 'player1') ? 'player2' : 'player1';
+                             
+                             newState[`${loser}_status`] = 'defeated';
+
+                             if(newState[`${otherPlayer}_hp`] > 0) {
+                                 // Other player is still alive, pass turn
+                                 newState.turn = otherPlayer;
+                                 newState.message = "The Boss defeated a hero! " + otherPlayer + "'s Turn!";
+                             } else {
+                                 // Both players are dead
+                                 newState.gameState = 'ended';
+                                 newState.message = 'The Boss has defeated you!';
+                                 newState.turn = null;
+                             }
+                        }
+                    } else {
+                        // Pass turn
+                        if (newState.gameState === 'pvp') {
+                            newState.turn = targetP;
+                            newState.message = `Player ${targetP === 'p1' ? 1 : 2}'s Turn!`;
+                        } else if (newState.gameState === 'boss') {
+                             // It's the boss's turn now
+                             newState.turn = 'boss_ai';
+                             newState.message = "The Boss is preparing an attack...";
+                        }
+                    }
+
+                    transaction.update(gameRef, newState);
+                 });
+             } catch (e) {
+                console.error("Action failed:", e);
+             }
+        }
+
+
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Simple loading spinner */
+        #loading-view::after {
+            content: '';
+            display: block;
+            width: 40px;
+            height: 40px;
+            margin: 20px auto;
+            border: 4px solid #f3f4f6;
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Controller buttons */
+        .btn-action {
+            @apply w-full h-24 text-2xl font-bold text-white uppercase rounded-lg shadow-lg transform transition-transform duration-100 ease-in-out;
+        }
+        .btn-action:active {
+            @apply scale-95;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
+
+    <!-- Loading View (Default) -->
+    <div id="loading-view" class="text-center">
+        <p class="text-xl">Connecting to game services...</p>
+    </div>
+
+    <!-- View Selector -->
+    <div id="view-selector" class="hidden text-center">
+        <h1 class="text-4xl font-bold mb-8">Fighting RPG</h1>
+        <div class="space-y-4">
+            <button id="select-host-btn" class="w-64 p-4 bg-blue-600 rounded-lg text-2xl font-bold hover:bg-blue-700 transition-colors">
+                Host Game (Main Screen)
+            </button>
+            <button id="select-player-btn" class="w-64 p-4 bg-green-600 rounded-lg text-2xl font-bold hover:bg-green-700 transition-colors">
+                Join Game (Controller)
+            </button>
+        </div>
+    </div>
+
+    <!-- Host View (Main Screen) -->
+    <div id="host-view" class="hidden w-full h-full max-w-6xl mx-auto flex flex-col">
+        <div class="bg-gray-800 p-4 rounded-lg shadow-lg mb-4 text-center">
+            <h1 class="text-2xl font-bold">Game Lobby</h1>
+            <p class="text-lg">Tell players to join with this Game ID:</p>
+            <p id="game-id-display" class="text-5xl font-extrabold text-yellow-400 tracking-widest my-2">------</p>
+            <p id="host-user-id" class="text-xs text-gray-400">Host ID: ...</p>
+        </div>
+
+        <!-- Game UI -->
+        <div class="flex-1 relative bg-gray-800 rounded-lg shadow-inner overflow-hidden">
+            <!-- Health Bars -->
+            <div class="absolute top-4 left-4 w-1/3 z-10">
+                <div class="text-lg font-bold text-blue-300">Player 1</div>
+                <div class="w-full bg-gray-700 rounded-full h-6 border-2 border-blue-900">
+                    <div id="p1-health-bar-inner" class="bg-blue-500 h-full rounded-full transition-all duration-500" style="width: 100%"></div>
+                </div>
+                <div id="p1-status-text" class="text-sm text-blue-200 h-4"></div>
+            </div>
+            
+            <div class="absolute top-4 right-4 w-1/3 z-10 text-right">
+                <div class="text-lg font-bold text-red-300">Player 2</div>
+                <div class="w-full bg-gray-700 rounded-full h-6 border-2 border-red-900">
+                    <div id="p2-health-bar-inner" class="bg-red-500 h-full rounded-full transition-all duration-500" style="width: 100%"></div>
+                </div>
+                <div id="p2-status-text" class="text-sm text-red-200 h-4"></div>
+            </div>
+            
+            <div id="boss-health-container" class="absolute top-1/3 left-1/4 w-1/2 z-10 hidden">
+                <div class="text-xl font-bold text-purple-300 text-center">FINAL BOSS</div>
+                <div class="w-full bg-gray-700 rounded-full h-8 border-2 border-purple-900">
+                    <div id="boss-health-bar-inner" class="bg-purple-600 h-full rounded-full transition-all duration-500" style="width: 100%"></div>
+                </div>
+            </div>
+
+            <!-- Game Canvas -->
+            <div id="canvas-container" class="absolute inset-0 w-full h-full">
+                <canvas id="game-canvas" class="w-full h-full"></canvas>
+            </div>
+            
+            <!-- Game Message -->
+            <div id="game-message" class="absolute bottom-10 left-0 right-0 text-center text-3xl font-bold text-white" style="text-shadow: 0 0 10px black;">
+                Waiting for players...
+            </div>
+        </div>
+    </div>
+
+    <!-- Player View (Controller) -->
+    <div id="player-view" class="hidden w-full max-w-md mx-auto">
+        
+        <!-- Join Game View -->
+        <div id="join-game-view" class="bg-gray-800 p-6 rounded-lg shadow-lg w-full">
+            <h2 class="text-3xl font-bold text-center mb-6">Join Game</h2>
+            <p id="player-user-id" class="text-xs text-gray-400 text-center mb-4">Player ID: ...</p>
+            <div class="mb-4">
+                <label for="game-id-input" class="block text-sm font-medium mb-2">Enter Game ID</label>
+                <input type="text" id="game-id-input" maxlength="6" class="w-full p-3 bg-gray-700 rounded-lg text-white text-2xl uppercase tracking-widest text-center" placeholder="ABC123">
+            </div>
+            <button id="join-game-btn" class="w-full p-4 bg-green-600 rounded-lg text-xl font-bold hover:bg-green-700 transition-colors">
+                Join Game
+            </button>
+            <p id="join-error" class="text-red-400 text-center mt-4 h-5"></p>
+        </div>
+
+        <!-- Controller View -->
+        <div id="controller-view" class="hidden w-full">
+            <div id="controller-message" class="text-center text-2xl font-bold mb-6 h-16">
+                Waiting for game to start...
+            </div>
+            
+            <div id="action-buttons" class="grid grid-cols-2 gap-4 opacity-50 pointer-events-none transition-opacity">
+                <button id="attack-btn" class="btn-action bg-red-600 hover:bg-red-700 col-span-2">Attack</button>
+                <button id="defend-btn" class="btn-action bg-blue-600 hover:bg-blue-700">Defend</button>
+                <button id="special-btn" class="btn-action bg-yellow-500 hover:bg-yellow-600 disabled:opacity-50 disabled:bg-gray-600" disabled>Special (0/100)</button>
+            </div>
+        </div>
+
+    </div>
+
+</body>
+</html>
+
