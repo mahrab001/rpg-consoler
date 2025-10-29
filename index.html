@@ -29,11 +29,21 @@
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- FIXED FIREBASE CONFIG ---
-        // This is now correctly loaded from the __firebase_config global variable
-        // provided by the environment, as required.
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' 
-            ? __firebase_config 
-            : '{}');
+        // This section is now hard-coded with your project's details
+        // from your screenshot.
+        const firebaseConfig = {
+          // ▼▼▼ API Key is now included ▼▼▼
+          apiKey: "AIzaSyDVH_Nol7VFTn7QTtYgX5a8Ip9UY2YretE", 
+          // ▲▲▲ API Key is now included ▲▲▲
+          authDomain: "sosta-rpg.firebaseapp.com",
+          databaseURL: "https://sosta-rpg-default-rtdb.asia-southeast1.firebasedatabase.app",
+          projectId: "sosta-rpg",
+          storageBucket: "sosta-rpg.appspot.com",
+          messagingSenderId: "596625537573",
+          appId: "1:596625537573:web:41a00f81cfeafaa875754",
+          measurementId: "G-TNQ0EZ6C2W"
+        };
+        // --- END OF FIXED CONFIG ---
 
         // --- GLOBAL VARIABLES ---
         let db, auth;
@@ -47,7 +57,8 @@
         let particles = [];
         
         // App ID (for Firestore path)
-        const firestoreAppId = typeof __app_id !== 'undefined' ? __app_id : 'sosta-rpg'; // Use your project ID as default for path
+        // This MUST match the project ID in your config and security rules
+        const firestoreAppId = typeof __app_id !== 'undefined' ? __app_id : 'sosta-rpg'; 
         
         // --- DOM ELEMENTS ---
         const viewSelector = document.getElementById('view-selector');
@@ -91,8 +102,8 @@
             try {
                 // --- FIXED --- Added config validation
                 if (!firebaseConfig.apiKey) {
-                    console.error("Firebase config is missing or invalid. Ensure __firebase_config is injected.");
-                    loadingView.textContent = "Error: Firebase configuration is missing. Cannot initialize app.";
+                    console.error("Firebase config is missing or invalid.");
+                    loadingView.textContent = "Error: Firebase configuration is missing or invalid.";
                     return; 
                 }
 
@@ -131,9 +142,9 @@
                                 const errorMsg = "Error: Auth config not found. Please enable 'Anonymous' sign-in in your Firebase project's Authentication > Sign-in method tab.";
                                 console.error(errorMsg);
                                 loadingView.textContent = errorMsg;
-                            } else if (authError.code === 'auth/invalid-custom-token') {
-                                // Fallback if token is bad
-                                console.warn("Invalid custom token. Falling back to anonymous sign-in.");
+                            } else if (authError.code === 'auth/invalid-custom-token' || authError.code === 'auth/custom-token-mismatch') {
+                                // Fallback if token is bad or mismatched (e.g., in a different environment)
+                                console.warn(`Invalid or mismatched custom token (${authError.code}). Falling back to anonymous sign-in.`);
                                 try {
                                     await signInAnonymously(auth);
                                 } catch (anonError) {
@@ -286,9 +297,9 @@
             if (gameState.lastAction) {
                 const action = gameState.lastAction;
                 if(action.type === 'attack') {
-                    spawnParticles(action.target === 'p2' ? 0.75 : 0.25, 'red');
+                    spawnParticles(action.target === 'p2' ? 0.75 : (action.target === 'player1' ? 0.25 : 0.5), 'red');
                 } else if (action.type === 'special') {
-                    spawnParticles(action.target === 'p2' ? 0.75 : 0.25, 'orange');
+                    spawnParticles(action.target === 'p2' ? 0.75 : (action.target === 'player1' ? 0.25 : 0.5), 'orange');
                 } else if (action.type === 'defend') {
                     spawnParticles(action.source === 'player1' ? 0.25 : 0.75, 'blue');
                 } else if (action.type === 'boss_attack') {
@@ -305,21 +316,22 @@
             await new Promise(resolve => setTimeout(resolve, 2000));
 
             // Prevent boss from acting if it's not its turn (safety check)
-            const freshGameState = await getDoc(doc(db, 'artifacts', firestoreAppId, 'public', 'data', 'games', currentGameId));
-            if (!freshGameState.exists() || freshGameState.data().turn !== 'boss_ai') {
+            const freshGameStateDoc = await getDoc(doc(db, 'artifacts', firestoreAppId, 'public', 'data', 'games', currentGameId));
+            if (!freshGameStateDoc.exists() || freshGameStateDoc.data().turn !== 'boss_ai') {
                 console.warn("Boss turn skipped (game state changed).");
                 return;
             }
+            const freshGameState = freshGameStateDoc.data();
 
             let targetPlayer = 'player1';
-            let targetHp = freshGameState.data().p1_hp;
+            let targetHp = freshGameState.p1_hp;
             // Target the player with more HP, but only if they are alive
-            if (freshGameState.data().p2_hp > freshGameState.data().p1_hp && freshGameState.data().p2_hp > 0) {
+            if (freshGameState.p2_hp > freshGameState.p1_hp && freshGameState.p2_hp > 0) {
                 targetPlayer = 'player2';
-                targetHp = freshGameState.data().p2_hp;
+                targetHp = freshGameState.p2_hp;
             }
             // If the primary target is dead, switch to the other one (if alive)
-            if (targetHp <= 0 && freshGameState.data()[targetPlayer === 'player1' ? 'p2_hp' : 'p1_hp'] > 0) {
+            if (targetHp <= 0 && freshGameState[targetPlayer === 'player1' ? 'p2_hp' : 'p1_hp'] > 0) {
                 targetPlayer = (targetPlayer === 'player1') ? 'player2' : 'player1';
             }
             
@@ -327,13 +339,13 @@
             let newState = {};
 
             if (targetPlayer === 'player1') {
-                const newHp = Math.max(0, freshGameState.data().p1_hp - damage);
+                const newHp = Math.max(0, freshGameState.p1_hp - damage);
                 newState = { p1_hp: newHp, lastAction: { type: 'boss_attack', target: 'player1', damage: damage } };
                 if (newHp === 0) {
                     newState.p1_status = 'defeated';
                 }
             } else {
-                const newHp = Math.max(0, freshGameState.data().p2_hp - damage);
+                const newHp = Math.max(0, freshGameState.p2_hp - damage);
                 newState = { p2_hp: newHp, lastAction: { type: 'boss_attack', target: 'player2', damage: damage } };
                 if (newHp === 0) {
                     newState.p2_status = 'defeated';
@@ -341,8 +353,8 @@
             }
             
             // Check for game over (using the new HP values)
-            const p1_hp = newState.p1_hp !== undefined ? newState.p1_hp : freshGameState.data().p1_hp;
-            const p2_hp = newState.p2_hp !== undefined ? newState.p2_hp : freshGameState.data().p2_hp;
+            const p1_hp = newState.p1_hp !== undefined ? newState.p1_hp : freshGameState.p1_hp;
+            const p2_hp = newState.p2_hp !== undefined ? newState.p2_hp : freshGameState.p2_hp;
 
             if(p1_hp <= 0 && p2_hp <= 0) {
                 newState.gameState = 'ended';
@@ -350,16 +362,18 @@
                 newState.turn = null;
             } else {
                 // Pass turn to next alive player
-                if(freshGameState.data().p1_hp > 0 && newState.p1_status !== 'defeated') {
+                if(p1_hp > 0) {
                     newState.turn = 'player1';
                     newState.message = "Player 1's Turn!";
-                } else if (freshGameState.data().p2_hp > 0 && newState.p2_status !== 'defeated') {
+                } else if (p2_hp > 0) {
                     newState.turn = 'player2';
                     newState.message = "Player 2's Turn!";
                 } else {
-                    // This should be caught by the p1_hp <= 0 && p2_hp <= 0 check, but as a fallback:
-                    newState.turn = 'player1'; // Default to p1 if both are alive
-                    newState.message = "Player 1's Turn!";
+                    // This is caught by the (p1_hp <= 0 && p2_hp <= 0) check
+                    // But as a fallback:
+                    newState.gameState = 'ended';
+                    newState.message = 'The Boss has defeated you!';
+                    newState.turn = null;
                 }
             }
 
@@ -654,7 +668,11 @@
 
                      // --- Determine target (PvP vs Boss) ---
                      let isBossFight = newState.gameState === 'boss';
-                     let targetKey = isBossFight ? 'boss' : targetP;
+                     let targetKey = isBossFight ? 'boss' : 'p2'; // Default to p2 if not boss
+                     if (!isBossFight) {
+                        targetKey = (myPlayerRole === 'player1') ? 'p2' : 'p1';
+                     }
+
 
                      // Calculate Action
                      if (actionType === 'attack') {
@@ -662,16 +680,16 @@
                          let finalDamage = damage;
                          
                          if (isBossFight) {
-                            // Boss isn't defending
-                            newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
-                            newState.lastAction = { type: 'attack', source: myPlayerRole, target: 'boss', damage: finalDamage };
+                             // Boss isn't defending
+                             newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
+                             newState.lastAction = { type: 'attack', source: myPlayerRole, target: 'boss', damage: finalDamage };
                          } else {
-                            // Check if PvP target is defending
-                            if(newState[`${targetP}_status`] === 'defending') {
-                                finalDamage = Math.floor(finalDamage / 2);
-                            }
-                            newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
-                            newState.lastAction = { type: 'attack', source: myPlayerRole, target: targetP, damage: finalDamage };
+                             // Check if PvP target is defending
+                             if(newState[`${targetP}_status`] === 'defending') {
+                                 finalDamage = Math.floor(finalDamage / 2);
+                             }
+                             newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
+                             newState.lastAction = { type: 'attack', source: myPlayerRole, target: targetP, damage: finalDamage };
                          }
                          
                          // Add special charge
@@ -690,11 +708,11 @@
                          let finalDamage = damage; // Defend doesn't block special
                          
                          if (isBossFight) {
-                            newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
-                            newState.lastAction = { type: 'special', source: myPlayerRole, target: 'boss', damage: finalDamage };
+                             newState.boss_hp = Math.max(0, newState.boss_hp - finalDamage);
+                             newState.lastAction = { type: 'special', source: myPlayerRole, target: 'boss', damage: finalDamage };
                          } else {
-                            newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
-                            newState.lastAction = { type: 'special', source: myPlayerRole, target: targetP, damage: finalDamage };
+                             newState[`${targetP}_hp`] = Math.max(0, newState[`${targetP}_hp`] - finalDamage);
+                             newState.lastAction = { type: 'special', source: myPlayerRole, target: targetP, damage: finalDamage };
                          }
                          
                          // Reset special charge
@@ -704,53 +722,53 @@
                      // --- AFTER ACTION ---
                      
                      if (isBossFight) {
-                        // --- Boss Fight Logic ---
-                        if (newState.boss_hp === 0) {
-                            // BOSS DEFEATED!
-                            newState.gameState = 'ended';
-                            newState.message = `The Boss has been defeated! ${myPlayerRole} wins!`;
-                            newState.turn = null;
-                        } else if (newState.p1_hp === 0 || newState.p2_hp === 0) {
-                            // A player was defeated
-                            const loser = (newState.p1_hp === 0) ? 'player1' : 'player2';
-                            const otherPlayer = (loser === 'player1') ? 'player2' : 'player1';
-                            
-                            newState[`${loser}_status`] = 'defeated';
+                         // --- Boss Fight Logic ---
+                         if (newState.boss_hp === 0) {
+                             // BOSS DEFEATED!
+                             newState.gameState = 'ended';
+                             newState.message = `The Boss has been defeated! ${myPlayerRole} wins!`;
+                             newState.turn = null;
+                         } else if (newState.p1_hp === 0 || newState.p2_hp === 0) {
+                             // A player was defeated
+                             const loser = (newState.p1_hp === 0) ? 'player1' : 'player2';
+                             const otherPlayer = (loser === 'player1') ? 'player2' : 'player1';
+                             
+                             newState[`${loser}_status`] = 'defeated';
 
-                            if(newState[`${otherPlayer}_hp`] > 0) {
-                                // Other player is still alive, pass turn to Boss
-                                newState.turn = 'boss_ai';
-                                newState.message = "The Boss is preparing an attack...";
-                            } else {
-                                // Both players are dead
-                                newState.gameState = 'ended';
-                                newState.message = 'The Boss has defeated you!';
-                                newState.turn = null;
-                            }
-                        } else {
-                            // Pass turn to Boss
-                            newState.turn = 'boss_ai';
-                            newState.message = "The Boss is preparing an attack...";
-                        }
+                             if(newState[`${otherPlayer}_hp`] > 0) {
+                                 // Other player is still alive, pass turn to Boss
+                                 newState.turn = 'boss_ai';
+                                 newState.message = "The Boss is preparing an attack...";
+                             } else {
+                                 // Both players are dead
+                                 newState.gameState = 'ended';
+                                 newState.message = 'The Boss has defeated you!';
+                                 newState.turn = null;
+                             }
+                         } else {
+                             // Pass turn to Boss
+                             newState.turn = 'boss_ai';
+                             newState.message = "The Boss is preparing an attack...";
+                         }
 
-                     } else {
-                        // --- PvP Fight Logic ---
-                        if (newState.p1_hp === 0 || newState.p2_hp === 0) {
-                            // A player was defeated in PvP
-                            const winner = (newState.p1_hp === 0) ? 'player2' : 'player1';
-                            const loser = (winner === 'player1') ? 'player2' : 'player1';
-                            
-                            newState.gameState = 'boss';
-                            newState.turn = winner; // Winner gets first turn against boss
-                            newState.message = `Player ${winner === 'player1' ? 1 : 2} wins! The FINAL BOSS appears!`;
-                            newState[`${loser}_status`] = 'defeated';
-                        
-                        } else {
-                            // Pass turn to other player
-                            newState.turn = targetP;
-                            newState.message = `Player ${targetP === 'p1' ? 1 : 2}'s Turn!`;
-                        }
-                     }
+                    } else {
+                         // --- PvP Fight Logic ---
+                         if (newState.p1_hp === 0 || newState.p2_hp === 0) {
+                             // A player was defeated in PvP
+                             const winner = (newState.p1_hp === 0) ? 'player2' : 'player1';
+                             const loser = (winner === 'player1') ? 'player2' : 'player1';
+                             
+                             newState.gameState = 'boss';
+                             newState.turn = winner; // Winner gets first turn against boss
+                             newState.message = `Player ${winner === 'player1' ? 1 : 2} wins! The FINAL BOSS appears!`;
+                             newState[`${loser}_status`] = 'defeated';
+                         
+                         } else {
+                             // Pass turn to other player
+                             newState.turn = targetP;
+                             newState.message = `Player ${targetP === 'p1' ? 1 : 2}'s Turn!`;
+                         }
+                    }
 
                      transaction.update(gameRef, newState);
                  });
@@ -827,12 +845,12 @@
         <div id="security-rules-warning" class="hidden bg-red-800 border border-red-600 text-red-100 p-4 rounded-lg my-4">
             <h4 class="font-bold text-lg mb-2">Firestore Security Error</h4>
             <p>Could not create the game due to a 'permission-denied' error. This means your <strong>Cloud Firestore</strong> security rules are not set up to allow public writes.</p>
-            <p class="mt-2">Please go to your Firebase project's <strong>Firestore Database > Rules</strong> tab and use the following rules to allow this game to function:</p>
+            <p class="mt-2">Please go to your Firebase project's <strong>Firestore Database > Rules</strong> tab and use the following rules to allow this game to function (this code uses 'sosta-rpg' as the ID):</p>
             <pre class="bg-gray-900 p-2 rounded mt-2 text-sm whitespace-pre-wrap"><code>rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // This rule allows anyone to read/write to the public path for this app
-    match /artifacts/$(firestoreAppId)/public/data/{document=**} {
+    match /artifacts/sosta-rpg/public/data/{document=**} {
       allow read, write: if true;
     }
   }
@@ -926,3 +944,4 @@ service cloud.firestore {
 
 </body>
 </html>
+
